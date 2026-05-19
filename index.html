@@ -286,13 +286,28 @@
                     }
                 }
 
-                let minsTrabalhados = 0;
+              let minsTrabalhados = 0;
                 let anomalias = [];
                 let obsTexto = (row['Obs'] || "").toLowerCase();
                 
+                // NOVO: Verificação de Data (Até Ontem)
+                let [diaStr, mesStr, anoStr] = (row['Data'] || "").split('/');
+                let dataLinha = new Date(anoStr, mesStr - 1, diaStr);
+                let dataHoje = new Date();
+                dataHoje.setHours(0, 0, 0, 0); // Zera as horas para comparar apenas a data
+                
+                // Verifica se a data da linha é hoje ou algum dia no futuro
+                let isHojeOuFuturo = dataLinha >= dataHoje;
+
                 let isImpar = batidas.length % 2 !== 0;
                 let isIncompleta = batidas.length > 0 && batidas.length < 4;
                 let justificado = termosAbono.some(termo => obsTexto.includes(termo));
+
+                // Se o dia for hoje ou futuro, ignora anomalias pois o dia ainda não acabou
+                if (isHojeOuFuturo) {
+                    isImpar = false;
+                    isIncompleta = false;
+                }
 
                 if (isImpar) {
                     anomalias.push('<span class="tag impar">⚠️ Batida Ímpar</span>');
@@ -319,7 +334,8 @@
                 let diaTexto = (row['Dia'] || "").toLowerCase();
                 let isFDS = diaTexto.includes("sabado") || diaTexto.includes("domingo");
                 
-                let minsEsperados = isFDS ? 0 : 480; 
+                // NOVO: Se for hoje ou futuro, zera a expectativa de horas trabalhadas (não desconta 8h)
+                let minsEsperados = (isFDS || isHojeOuFuturo) ? 0 : 480; 
                 let saldoDia = minsTrabalhados - minsEsperados;
                 
                 if (isFDS && minsTrabalhados > 0) {
