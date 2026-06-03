@@ -139,17 +139,13 @@ const termosAbono = [
 async function processPage(page) {
     const content = await page.getTextContent();
     const items = content.items;
-    
+
     let rowsMap = {};
     let name = "Desconhecido";
     let saldoAnteriorStr = "0,00";
 
-    // Limites das colunas
-    let limiteInicioBatidas = 90;       // depois da coluna Data/Dia
-    let limiteFimBatidas = 9999;        // será ajustado pela coluna Abono
-
     let fullText = items.map(i => i.str).join(" ");
-    
+
     let nameMatch = fullText.match(/Nome:\s*(.*?)(?=\s+C\.C\.|\s+Turno|\s+CPF|\s+Departamento|\s+Categoria)/i);
     if (nameMatch) {
         name = nameMatch[1].replace(/\|/g, '').trim();
@@ -162,40 +158,6 @@ async function processPage(page) {
         if (numerosEncontrados && numerosEncontrados.length > 0) {
             saldoAnteriorStr = numerosEncontrados[0];
         }
-    }
-
-    /*
-        CORREÇÃO PRINCIPAL:
-        Antes o sistema usava a coluna H.E. como limite.
-        Isso fazia o Abono ser lido como batida.
-        Agora o limite final das batidas é a coluna ABONO.
-    */
-    items.forEach(it => {
-        let texto = (it.str || "").trim().toUpperCase();
-        let x = it.transform[4];
-
-        if (texto === "ABONO") {
-            limiteFimBatidas = x - 10;
-        }
-    });
-
-    /*
-        Segurança extra:
-        Se por algum motivo não encontrar a coluna Abono,
-        tenta usar H.E. como reserva, mas com margem maior.
-    */
-    if (limiteFimBatidas === 9999) {
-        items.forEach(it => {
-            let texto = (it.str || "").trim().toUpperCase()
-                .replace(/\s/g, "")
-                .replace(/\./g, "");
-
-            let x = it.transform[4];
-
-            if (texto === "HE" || texto === "ΗΕ") {
-                limiteFimBatidas = x - 65;
-            }
-        });
     }
 
     items.forEach(it => {
@@ -211,6 +173,68 @@ async function processPage(page) {
     });
 
     const sortedY = Object.keys(rowsMap).sort((a, b) => b - a);
+
+    let headerLine = null;
+
+    for (let y of sortedY) {
+        let line = rowsMap[y].sort((a, b) => a.transform[4] - b.transform[4]);
+        let txt = line.map(i => i.str.trim()).join(" ").toUpperCase();
+
+        if (
+            txt.includes("DATA") &&
+            txt.includes("DIA") &&
+            txt.includes("ABONO") &&
+            txt.includes("JORNADA")
+        ) {
+            headerLine = line;
+            break;
+        }
+    }
+
+    let colunas = {
+        data: 0,
+        dia: 0,
+        primeiraBatida: 0,
+        fimBatidas: 9999,
+        abono: 9999,
+        he: 9999,
+        absent: 9999,
+        jornada: 9999,
+        adNot: 9999,
+        obs: 9999
+    };
+
+    if (headerLine) {
+        headerLine.forEach(it => {
+            let texto = it.str.trim().toUpperCase()
+                .replace(/\s/g, "")
+                .replace(/\./g, "");
+
+            let x = it.transform[4];
+
+            if (texto === "DATA") colunas.data = x;
+            if (texto === "DIA") colunas.dia = x;
+            if (texto.includes("1AE")) colunas.primeiraBatida = x;
+            if (texto.includes("ABONO")) colunas.abono = x;
+            if (texto === "HE") colunas.he = x;
+            if (texto.includes("ABSENT")) colunas.absent = x;
+            if (texto.includes("JORNADA")) colunas.jornada = x;
+            if (texto.includes("ADNOT")) colunas.adNot = x;
+            if (texto.includes("OBSERV")) colunas.obs = x;
+        });
+
+        colunas.fimBatidas = colunas.abono;
+    }
+
+    function estaEntre(x, inicio, fim) {
+        return x >= inicio && x < fim;
+    }
+
+    function pegarHora(val) {
+        let m = val.match(/\d{2}:\d{2}/);
+        return m ? m[0] : "";
+    }
+
     let data = [];
 
     for (let y of sortedY) {
@@ -219,7 +243,7 @@ async function processPage(page) {
         let fullLineText = line.map(i => i.str).join(" ");
 
         if (/^\d{2}\/\d{2}\/\d{4}/.test(first)) {
-            let row = { 
+            let row = {
                 Colaborador: name,
                 Data: first,
                 Dia: line[1] ? line[1].str : "",
@@ -229,14 +253,17 @@ async function processPage(page) {
                 'Batida 4': "",
                 'Batida 5': "",
                 'Batida 6': "",
-                'HE/Débito': "",
+                Abono: "",
+                'H.E.': "",
+                Absent: "",
+                Jornada: "",
+                'Ad. Not.': "",
                 Obs: "",
                 'Saldo Anterior Original': saldoAnteriorStr
             };
 
             let punches = [];
             let obsArr = [];
-            let valoresAdministrativos = [];
 
             line.forEach(it => {
                 let x = it.transform[4];
@@ -244,24 +271,27 @@ async function processPage(page) {
 
                 if (!val || val === "|") return;
 
-                let timeMatch = val.match(/\d{2}:\d{2}/);
+                let hora = pegarHora(val);
 
-                /*
-                    Aqui está a lógica limpa:
-                    Só é batida se estiver dentro da área das colunas de marcação.
-                    Abono, H.E., Absent., Jornada, Ad. Not. e Observação ficam fora.
-                */
-                if (timeMatch) {
-                    if (x >= limiteInicioBatidas && x < limiteFimBatidas) {
-                        punches.push(timeMatch[0]);
-                    } else {
-                        valoresAdministrativos.push(timeMatch[0]);
+                if (hora) {
+                    if (estaEntre(x, colunas.primeiraBatida - 10, colunas.fimBatidas - 5)) {
+                        punches.push(hora);
+                    } else if (estaEntre(x, colunas.abono - 8, colunas.he - 5)) {
+                        row.Abono = hora;
+                    } else if (estaEntre(x, colunas.he - 8, colunas.absent - 5)) {
+                        row['H.E.'] = hora;
+                    } else if (estaEntre(x, colunas.absent - 8, colunas.jornada - 5)) {
+                        row.Absent = hora;
+                    } else if (estaEntre(x, colunas.jornada - 8, colunas.adNot - 5)) {
+                        row.Jornada = hora;
+                    } else if (estaEntre(x, colunas.adNot - 8, colunas.obs - 5)) {
+                        row['Ad. Not.'] = hora;
                     }
                 } else {
                     let naoEhData = !/^\d{2}\/\d{2}\/\d{4}/.test(val);
                     let naoEhDia = val !== row.Dia;
 
-                    if (naoEhData && naoEhDia && x >= limiteFimBatidas) {
+                    if (naoEhData && naoEhDia && x >= colunas.obs - 10) {
                         obsArr.push(val);
                     }
                 }
@@ -273,8 +303,6 @@ async function processPage(page) {
             row['Batida 4'] = punches[3] || "";
             row['Batida 5'] = punches[4] || "";
             row['Batida 6'] = punches[5] || "";
-
-            row['HE/Débito'] = valoresAdministrativos.join(" ").trim();
 
             if (punches.length === 0 && fullLineText.length > 20) {
                 let obsText = fullLineText.split(row.Dia)[1];
@@ -407,19 +435,36 @@ async function processPage(page) {
                 
                 // NOVO: Se for hoje ou futuro, zera a expectativa de horas trabalhadas (não desconta 8h)
                 let minsEsperados = (isFDS || isHojeOuFuturo) ? 0 : 480; 
-                let saldoDia = minsTrabalhados - minsEsperados;
-                
+let abonoMins = timeToMins(row['Abono']);
+let heMins = timeToMins(row['H.E.']);
+let absentMins = timeToMins(row['Absent']);
+
+let saldoDia = 0;
+
+/*
+    Regra mais fiel ao espelho:
+    - Se o sistema trouxe H.E., usa como crédito.
+    - Se trouxe Absent., usa como débito.
+    - Se também trouxe Abono, ele compensa o Absent.
+    Exemplo dia 05/05:
+    Abono 02:00
+    Absent 02:01
+    Saldo = 00:01 negativo.
+*/
+if (heMins > 0 || absentMins > 0 || abonoMins > 0) {
+    let debitoReal = Math.max(0, absentMins - abonoMins);
+    saldoDia = heMins - debitoReal;
+} else {
+    saldoDia = minsTrabalhados - minsEsperados;
+}                
                 if (isFDS && minsTrabalhados > 0) {
                     anomalias.push('<span class="tag fds">🚀 Hora Extra FDS</span>');
                     saldoDia = minsTrabalhados;
                 }
 
-                if (saldoDia < 0) {
-                    if (justificado) {
-                        saldoDia = 0; 
-                        anomalias.push('<span class="tag abono">✅ Falta Abonada</span>');
-                    }
-                }
+              if (abonoMins > 0) {
+    anomalias.push('<span class="tag abono">✅ Abono Informado</span>');
+}
 
                 if (saldoDia > 0) {
                     colaboradores[nome].horasPositivas += saldoDia;
@@ -429,7 +474,11 @@ async function processPage(page) {
 
                 colaboradores[nome].dias.push({
                     data: row['Data'], dia: row['Dia'], batidasStr: batidas.join(" | "),
-                    trabalhado: minsTrabalhados, saldo: saldoDia, obs: row['Obs'] || "", 
+                    trabalhado: minsTrabalhados, saldo: saldoDia, obs: row['Obs'] || "",
+abono: abonoMins,
+he: heMins,
+absent: absentMins,
+jornadaOriginal: row['Jornada'] || "", 
                     anomalias: anomalias.join(""), isImpar: isImpar, isIncompleta: (isIncompleta && !justificado)
                 });
 
