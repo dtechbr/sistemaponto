@@ -136,95 +136,161 @@ const termosAbono = [
             }
         }
 
-        async function processPage(page) {
-            const content = await page.getTextContent();
-            const items = content.items;
-            
-            let rowsMap = {};
-            let name = "Desconhecido";
-            let saldoAnteriorStr = "0,00";
-            let limitX = 380; 
+async function processPage(page) {
+    const content = await page.getTextContent();
+    const items = content.items;
+    
+    let rowsMap = {};
+    let name = "Desconhecido";
+    let saldoAnteriorStr = "0,00";
 
-            let fullText = items.map(i => i.str).join(" ");
-            
-            let nameMatch = fullText.match(/Nome:\s*(.*?)(?=\s+C\.C\.|\s+Turno|\s+CPF|\s+Departamento|\s+Categoria)/i);
-            if (nameMatch) name = nameMatch[1].replace(/\|/g, '').trim();
+    // Limites das colunas
+    let limiteInicioBatidas = 90;       // depois da coluna Data/Dia
+    let limiteFimBatidas = 9999;        // será ajustado pela coluna Abono
 
-            let bancoMatch = fullText.match(/Banco\s+de\s+Horas/i);
-            if (bancoMatch) {
-                let textoBanco = fullText.substring(bancoMatch.index);
-                let numerosEncontrados = textoBanco.match(/-?\d+,\d{2}/g);
-                if (numerosEncontrados && numerosEncontrados.length > 0) {
-                    saldoAnteriorStr = numerosEncontrados[0];
-                }
-            }
+    let fullText = items.map(i => i.str).join(" ");
+    
+    let nameMatch = fullText.match(/Nome:\s*(.*?)(?=\s+C\.C\.|\s+Turno|\s+CPF|\s+Departamento|\s+Categoria)/i);
+    if (nameMatch) {
+        name = nameMatch[1].replace(/\|/g, '').trim();
+    }
 
-            items.forEach(it => {
-                let cleanStr = it.str.replace(/[\.\s]/g, '').toUpperCase();
-                if (cleanStr.includes("HE") || cleanStr.includes("ΗΕ")) {
-                    limitX = it.transform[4] - 15; 
-                }
-            });
-
-            items.forEach(it => {
-                if(!it.str.trim() || it.str === "|") return;
-                let y = Math.round(it.transform[5]);
-                let existingY = Object.keys(rowsMap).find(k => Math.abs(Number(k) - y) <= 4);
-                if(existingY) y = existingY;
-                if(!rowsMap[y]) rowsMap[y] = [];
-                rowsMap[y].push(it);
-            });
-
-            const sortedY = Object.keys(rowsMap).sort((a,b) => b - a);
-            let data = [];
-
-            for (let y of sortedY) {
-                let line = rowsMap[y].sort((a,b) => a.transform[4] - b.transform[4]);
-                let first = line[0].str.trim();
-                let fullLineText = line.map(i => i.str).join(" ");
-
-                if (/^\d{2}\/\d{2}\/\d{4}/.test(first)) {
-                    let row = { 
-                        Colaborador: name, Data: first, Dia: line[1] ? line[1].str : "",
-                        'Batida 1': "", 'Batida 2': "", 'Batida 3': "", 
-                        'Batida 4': "", 'Batida 5': "", 'Batida 6': "", 
-                        'HE/Débito': "", Obs: "", 'Saldo Anterior Original': saldoAnteriorStr
-                    };
-
-                    let punches = [];
-                    let obsArr = [];
-
-                    line.forEach(it => {
-                        let x = it.transform[4];
-                        let val = it.str.trim();
-                        let timeMatch = val.match(/\d{2}:\d{2}/);
-
-                        if (timeMatch) {
-                            if (x < limitX) punches.push(timeMatch[0]);
-                            else row['HE/Débito'] += timeMatch[0] + " ";
-                        } else if (!/^\d{2}\/\d{2}/.test(val) && val !== row.Dia && x > limitX) {
-                            obsArr.push(val);
-                        }
-                    });
-
-                    if(punches[0]) row['Batida 1'] = punches[0];
-                    if(punches[1]) row['Batida 2'] = punches[1];
-                    if(punches[2]) row['Batida 3'] = punches[2];
-                    if(punches[3]) row['Batida 4'] = punches[3];
-                    if(punches[4]) row['Batida 5'] = punches[4];
-                    if(punches[5]) row['Batida 6'] = punches[5];
-
-                    if (punches.length === 0 && fullLineText.length > 20) {
-                        let obsText = fullLineText.split(row.Dia)[1];
-                        if (obsText) row.Obs = obsText.replace(/\|/g, '').trim();
-                    } else {
-                        row.Obs = obsArr.join(" ").replace(/\|/g, '').trim();
-                    }
-                    data.push(row);
-                }
-            }
-            return data;
+    let bancoMatch = fullText.match(/Banco\s+de\s+Horas/i);
+    if (bancoMatch) {
+        let textoBanco = fullText.substring(bancoMatch.index);
+        let numerosEncontrados = textoBanco.match(/-?\d+,\d{2}/g);
+        if (numerosEncontrados && numerosEncontrados.length > 0) {
+            saldoAnteriorStr = numerosEncontrados[0];
         }
+    }
+
+    /*
+        CORREÇÃO PRINCIPAL:
+        Antes o sistema usava a coluna H.E. como limite.
+        Isso fazia o Abono ser lido como batida.
+        Agora o limite final das batidas é a coluna ABONO.
+    */
+    items.forEach(it => {
+        let texto = (it.str || "").trim().toUpperCase();
+        let x = it.transform[4];
+
+        if (texto === "ABONO") {
+            limiteFimBatidas = x - 10;
+        }
+    });
+
+    /*
+        Segurança extra:
+        Se por algum motivo não encontrar a coluna Abono,
+        tenta usar H.E. como reserva, mas com margem maior.
+    */
+    if (limiteFimBatidas === 9999) {
+        items.forEach(it => {
+            let texto = (it.str || "").trim().toUpperCase()
+                .replace(/\s/g, "")
+                .replace(/\./g, "");
+
+            let x = it.transform[4];
+
+            if (texto === "HE" || texto === "ΗΕ") {
+                limiteFimBatidas = x - 65;
+            }
+        });
+    }
+
+    items.forEach(it => {
+        if (!it.str.trim() || it.str === "|") return;
+
+        let y = Math.round(it.transform[5]);
+        let existingY = Object.keys(rowsMap).find(k => Math.abs(Number(k) - y) <= 4);
+
+        if (existingY) y = existingY;
+
+        if (!rowsMap[y]) rowsMap[y] = [];
+        rowsMap[y].push(it);
+    });
+
+    const sortedY = Object.keys(rowsMap).sort((a, b) => b - a);
+    let data = [];
+
+    for (let y of sortedY) {
+        let line = rowsMap[y].sort((a, b) => a.transform[4] - b.transform[4]);
+        let first = line[0].str.trim();
+        let fullLineText = line.map(i => i.str).join(" ");
+
+        if (/^\d{2}\/\d{2}\/\d{4}/.test(first)) {
+            let row = { 
+                Colaborador: name,
+                Data: first,
+                Dia: line[1] ? line[1].str : "",
+                'Batida 1': "",
+                'Batida 2': "",
+                'Batida 3': "",
+                'Batida 4': "",
+                'Batida 5': "",
+                'Batida 6': "",
+                'HE/Débito': "",
+                Obs: "",
+                'Saldo Anterior Original': saldoAnteriorStr
+            };
+
+            let punches = [];
+            let obsArr = [];
+            let valoresAdministrativos = [];
+
+            line.forEach(it => {
+                let x = it.transform[4];
+                let val = it.str.trim();
+
+                if (!val || val === "|") return;
+
+                let timeMatch = val.match(/\d{2}:\d{2}/);
+
+                /*
+                    Aqui está a lógica limpa:
+                    Só é batida se estiver dentro da área das colunas de marcação.
+                    Abono, H.E., Absent., Jornada, Ad. Not. e Observação ficam fora.
+                */
+                if (timeMatch) {
+                    if (x >= limiteInicioBatidas && x < limiteFimBatidas) {
+                        punches.push(timeMatch[0]);
+                    } else {
+                        valoresAdministrativos.push(timeMatch[0]);
+                    }
+                } else {
+                    let naoEhData = !/^\d{2}\/\d{2}\/\d{4}/.test(val);
+                    let naoEhDia = val !== row.Dia;
+
+                    if (naoEhData && naoEhDia && x >= limiteFimBatidas) {
+                        obsArr.push(val);
+                    }
+                }
+            });
+
+            row['Batida 1'] = punches[0] || "";
+            row['Batida 2'] = punches[1] || "";
+            row['Batida 3'] = punches[2] || "";
+            row['Batida 4'] = punches[3] || "";
+            row['Batida 5'] = punches[4] || "";
+            row['Batida 6'] = punches[5] || "";
+
+            row['HE/Débito'] = valoresAdministrativos.join(" ").trim();
+
+            if (punches.length === 0 && fullLineText.length > 20) {
+                let obsText = fullLineText.split(row.Dia)[1];
+                if (obsText) {
+                    row.Obs = obsText.replace(/\|/g, '').trim();
+                }
+            } else {
+                row.Obs = obsArr.join(" ").replace(/\|/g, '').trim();
+            }
+
+            data.push(row);
+        }
+    }
+
+    return data;
+}
 
         function timeToMins(timeStr) {
             if (!timeStr || !timeStr.includes(':')) return 0;
