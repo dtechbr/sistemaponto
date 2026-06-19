@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="pt-br">
 <head>
     <meta charset="UTF-8">
@@ -433,8 +433,8 @@ async function processPage(page) {
                 let diaTexto = (row['Dia'] || "").toLowerCase();
                 let isFDS = diaTexto.includes("sabado") || diaTexto.includes("domingo");
                 
-                // NOVO: Se for hoje ou futuro, zera a expectativa de horas trabalhadas (não desconta 8h)
-                let minsEsperados = (isFDS || isHojeOuFuturo) ? 0 : 480; 
+                // NOVO: Se for hoje ou futuro, ou dia justificado (férias, feriado, etc), zera a expectativa de horas trabalhadas (não desconta 8h)
+                let minsEsperados = (isFDS || isHojeOuFuturo || justificado) ? 0 : 480; 
 let abonoMins = timeToMins(row['Abono']);
 let heMins = timeToMins(row['H.E.']);
 let absentMins = timeToMins(row['Absent']);
